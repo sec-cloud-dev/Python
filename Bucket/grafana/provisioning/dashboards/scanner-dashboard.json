@@ -1,0 +1,67 @@
+{
+  "title": "Cloud Security Scanner",
+  "uid": "scanner-dashboard",
+  "timezone": "browser",
+  "panels": [
+    {
+      "title": "DANGER Findings",
+      "type": "stat",
+      "targets": [
+        {
+          "expr": "scanner_danger_findings",
+          "legendFormat": "DANGER"
+        }
+      ]
+    },
+    {
+      "title": "WARNING Findings",
+      "type": "stat",
+      "targets": [
+        {
+          "expr": "scanner_warning_findings",
+          "legendFormat": "WARNING"
+        }
+      ]
+    },
+    {
+      "title": "SAFE Findings",
+      "type": "stat",
+      "targets": [
+        {
+          "expr": "scanner_safe_findings",
+          "legendFormat": "SAFE"
+        }
+      ]
+    },
+    {
+      "title": "Buckets Scanned",
+      "type": "stat",
+      "targets": [
+        {
+          "expr": "scanner_buckets_scanned",
+          "legendFormat": "Buckets"
+        }
+      ]
+    },
+    {
+      "title": "Findings Over Time",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "scanner_danger_findings",
+          "legendFormat": "DANGER"
+        },
+        {
+          "expr": "scanner_warning_findings",
+          "legendFormat": "WARNING"
+        },
+        {
+          "expr": "scanner_safe_findings",
+          "legendFormat": "SAFE"
+        }
+      ]
+    }
+  ],
+  "schemaVersion": 38,
+  "version": 0
+}

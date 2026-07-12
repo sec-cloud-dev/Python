@@ -1,0 +1,88 @@
+name: DevSecOps Pipeline
+
+on:
+  push:
+    branches: [master]
+
+jobs:
+  gitleaks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Gitleaks Scan
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  bandit:
+    needs: [gitleaks]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Bandit SAST
+        run: |
+          pip install bandit
+          bandit -r . --exclude ./tests
+
+  pytest:
+    needs: [gitleaks]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.14.6'
+          cache: 'pip'
+      - name: Install dependencies
+        run: |
+          pip install -r requirements-dev.txt
+      - name: Run Test
+        run: pytest tests
+
+  pip:
+    needs: [gitleaks]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run pip audit
+        run: |
+          pip install pip-audit
+          pip-audit --requirement requirements.txt
+
+  flake8:
+    needs: [gitleaks]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Flake8 Lint
+        run: |
+          pip install flake8
+          flake8 . --max-line-length=120 --ignore=E501,E402,W291,W292
+
+  build:
+    needs: [bandit, pip, flake8, pytest]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build Docker Image
+        run: docker build -t cr.yandex/${{ secrets.YC_REGISTRY_ID }}/bucket-scanner:v67777 .
+    
+      - name: Trivy Scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: "cr.yandex/${{ secrets.YC_REGISTRY_ID }}/bucket-scanner:v67777"
+          format: "table"
+          exit-code: "1"
+          ignore-unfixed: true
+          severity: "CRITICAL"
+
+      - name: Docker Login
+        run: |
+          echo '${{ secrets.YC_PRIVATE_KEY }}' | docker login --username json_key --password-stdin cr.yandex
+
+      - name: Docker Push Yandex.cloud
+        run: |
+          docker push cr.yandex/${{ secrets.YC_REGISTRY_ID }}/bucket-scanner:v67777

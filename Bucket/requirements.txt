@@ -1,0 +1,9 @@
+boto3==1.34.131
+botocore==1.34.131
+requests==2.33.0
+python-dotenv==1.2.2
+tenacity==8.5.0
+psycopg2-binary==2.9.9
+types-requests==2.32.0.20240712
+mypy==1.11.1
+prometheus-client==0.20.0
