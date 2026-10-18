@@ -1,27 +1,23 @@
 import logging
-from typing import Any
-from src.clients.yandex_client import (
-    triggers_get,
-    folder_access_bindings_get,
-    cloud_bindings_get,
-    organization_bindings_get,
-    organization_id_get,
-)
-from src.utils.extract_utils import _extract_sa_roles_for_bucket
-from src.utils.risk_utils import bindings_source, overall_risk
 from src.config import DANGEROUS_ROLES, SAFE_ROLES
+from src.inventory import BINDING_SOURCES, CloudInventory
+from src.utils.extract_utils import _extract_sa_roles_for_bucket
+from src.utils.models import Finding
+from src.utils.risk_utils import IAM_SCOPE_EVIDENCE, bindings_source, finding_from_risk, overall_risk
 
 logger = logging.getLogger(__name__)
 
 
-def bucket_triggers_checkout(fol: str, col: str, name: str) -> list[dict[str, Any]]:
+def bucket_triggers_checkout(inventory: CloudInventory, name: str) -> Finding:
+    rule_id = "functions.trigger_sa"
+    missing = inventory.missing("triggers", *BINDING_SOURCES)
     report = []
 
-    folder_bindings = folder_access_bindings_get(fol)
-    cloud_bindings = cloud_bindings_get(col)
-    organization_bindings = organization_bindings_get(organization_id_get())
+    folder_bindings = inventory.folder_bindings or []
+    cloud_bindings = inventory.cloud_bindings or []
+    organization_bindings = inventory.organization_bindings or []
 
-    for trig in triggers_get(fol):
+    for trig in inventory.triggers or []:
 
         rule = trig.get("rule", {}).get("objectStorage", "")
 
@@ -64,5 +60,9 @@ def bucket_triggers_checkout(fol: str, col: str, name: str) -> list[dict[str, An
         report.append(chains)
 
     risp = overall_risk(report, risk="Risk")
+    if not report:
+        message = "Триггеров Cloud Functions на бакет нет"
+    else:
+        message = f"Триггеров на бакет: {len(report)}, с опасными ролями SA: {sum(1 for c in report if c['Risk'] == 'DANGER')}"
 
-    return {"Risk": risp, "Chains": report}
+    return finding_from_risk(rule_id, name, risp, message, {**IAM_SCOPE_EVIDENCE, "chains": report}, missing)

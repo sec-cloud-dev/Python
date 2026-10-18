@@ -1,46 +1,44 @@
-import sys
-import os
-from unittest.mock import patch
-
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-
 from src.checks.vm_checks import checks_vm_sa_bucket_access
+from src.inventory import CloudInventory
+from src.utils.models import Severity
 
 
-@patch("src.checks.vm_checks.vm_get")
-@patch("src.checks.vm_checks.folder_access_bindings_get")
-@patch("src.checks.vm_checks.cloud_bindings_get")
-@patch("src.checks.vm_checks.organization_bindings_get")
-@patch("src.checks.vm_checks.organization_id_get")
-def test_vm_public_ip_with_dangerous_role(
-    mock_org_id, mock_org_bindings, mock_cloud_bindings, mock_folder_bindings, mock_vm_get
-):
+def test_vm_public_ip_with_dangerous_role():
+    inventory = CloudInventory(
+        folder_id="fake-folder",
+        cloud_id="fake-cloud",
+        vms=[
+            {
+                "id": "vm-123",
+                "name": "hacked-vm",
+                "serviceAccountId": "sa-admin-id",
+                "networkInterfaces": [{"primaryV4Address": {"oneToOneNat": {"address": "8.8.8.8"}}}],
+            }
+        ],
+        folder_bindings=[{"roleId": "admin", "subject": {"id": "sa-admin-id", "type": "serviceAccount"}}],
+        cloud_bindings=[],
+        organization_bindings=[],
+    )
 
-    mock_org_id.return_value = "fake-org-id"
+    result = checks_vm_sa_bucket_access(inventory)
 
-    mock_vm_get.return_value = [
-        {
-            "id": "vm-123",
-            "name": "hacked-vm",
-            "serviceAccountId": "sa-admin-id",
-            "networkInterfaces": [{"primaryV4Address": {"oneToOneNat": {"address": "8.8.8.8"}}}],
-        }
-    ]
+    assert result.severity is Severity.HIGH
+    chains = result.evidence["chains"]
+    assert len(chains) == 1
 
-    mock_folder_bindings.return_value = [
-        {"roleId": "admin", "subject": {"id": "sa-admin-id", "type": "serviceAccount"}}
-    ]
-
-    mock_cloud_bindings.return_value = []
-    mock_org_bindings.return_value = []
-
-    result = checks_vm_sa_bucket_access(folder_id="fake-folder", cloud_id="fake-cloud", bucket_name="my-secret-bucket")
-
-    assert result["status"] == "DANGER"
-    assert len(result["chains"]) == 1
-
-    chain = result["chains"][0]
+    chain = chains[0]
     assert chain["vm_name"] == "hacked-vm"
     assert chain["public_ip"] is True
     assert chain["risk"] == "DANGER"
     assert "admin" in chain["roles"]
+
+
+def test_vm_check_with_failed_bindings_is_unknown():
+    inventory = CloudInventory(
+        folder_id="f", cloud_id="c", vms=[], folder_bindings=None, cloud_bindings=[], organization_bindings=[]
+    )
+
+    result = checks_vm_sa_bucket_access(inventory)
+
+    assert result.severity is Severity.UNKNOWN
+    assert result.evidence["missing_sources"] == ["folder_bindings"]

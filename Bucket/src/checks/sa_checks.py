@@ -1,67 +1,70 @@
 import logging
 from datetime import datetime, timezone
-from typing import Any
-from src.clients.yandex_client import (
-    folder_access_bindings_get,
-    cloud_bindings_get,
-    organization_bindings_get,
-    organization_id_get,
-    access_key_sa,
-    sa_get,
-)
-from src.utils.extract_utils import _extract_sa_roles_for_bucket
-from src.utils.risk_utils import overall_risk
 from src.config import DANGEROUS_ROLES, SAFE_ROLES
+from src.inventory import BINDING_SOURCES, CloudInventory
+from src.utils.extract_utils import _extract_sa_roles_for_bucket
+from src.utils.models import FOLDER_SCOPE, Finding
+from src.utils.risk_utils import IAM_SCOPE_EVIDENCE, finding_from_risk, overall_risk
 
 logger = logging.getLogger(__name__)
 
 
-def check_all_sa_bucket(folder_id: str, cloud_id: str, bucket_name: str) -> list[dict[str, Any]]:
-    logger.info(f"Проверка SA с доступом к бакету: '{bucket_name}'")
+def check_all_sa_bucket(inventory: CloudInventory) -> Finding:
+    """SA roles on Object Storage. Bindings are folder/cloud/organization level, so this is a folder finding."""
+    rule_id = "iam.sa_roles"
+    logger.info("Проверка SA с доступом к Object Storage")
 
+    missing = inventory.missing(*BINDING_SOURCES)
     results = []
-    folder_bindings = folder_access_bindings_get(folder_id)
-    cloud_bindings = cloud_bindings_get(cloud_id)
-    organization_bindings = organization_bindings_get(organization_id_get())
-
-    all_roles = folder_bindings + cloud_bindings + organization_bindings
+    all_roles = [
+        *(inventory.folder_bindings or []),
+        *(inventory.cloud_bindings or []),
+        *(inventory.organization_bindings or []),
+    ]
     all_sa_roles, _ = _extract_sa_roles_for_bucket(all_roles)
 
     for sa_id, roles in all_sa_roles.items():
         if roles & DANGEROUS_ROLES:
-            logger.warning(f"Бакет: {bucket_name}: SA: {sa_id} имеет опасные роли для бакета: {sorted(roles)}")
+            logger.warning(f"SA: {sa_id} имеет опасные роли на все бакеты папки: {sorted(roles)}")
             risk = "DANGER"
         elif roles & SAFE_ROLES:
-            logger.info(f"Бакет: {bucket_name}: SA: {sa_id} Имеет безопасные роли для бакета: {sorted(roles)}")
+            logger.info(f"SA: {sa_id} Имеет безопасные роли: {sorted(roles)}")
             risk = "SAFE"
         else:
-            logger.warning(f"Бакет: {bucket_name}: SA: {sa_id} Имеет не определенные роли для бакета: {sorted(roles)}")
+            logger.warning(f"SA: {sa_id} Имеет не определенные роли: {sorted(roles)}")
             risk = "WARNING"
 
         sa = {"sa_id": sa_id, "role": sorted(roles), "risk": risk}
 
         results.append(sa)
 
-    if not results:
-        return {"status": "NO_SA", "sa_list": []}
-
     status_sa = overall_risk(results, risk="risk")
+    dangerous = sum(1 for sa in results if sa["risk"] == "DANGER")
+    if not results:
+        message = "SA с ролями не найдены"
+    elif dangerous:
+        message = f"SA с опасными ролями на все бакеты папки: {dangerous} из {len(results)}"
+    else:
+        message = f"SA с ролями: {len(results)}, опасных ролей нет"
 
-    return {"status": status_sa, "sa_list": results}
+    return finding_from_risk(rule_id, FOLDER_SCOPE, status_sa, message, {**IAM_SCOPE_EVIDENCE, "sa_list": results},
+                             missing)
 
 
-def checks_sa_stat_key(folder_id: str) -> dict[str, Any]:
-    sa_list = sa_get(folder_id)
+def checks_sa_stat_key(inventory: CloudInventory) -> Finding:
+    rule_id = "iam.static_keys"
+    missing = inventory.missing("service_accounts", "access_keys")
+    sa_list = inventory.service_accounts or []
+    access_keys = inventory.access_keys or {}
     report = []
 
     if not sa_list:
         logger.info("Не найдено SA в папке")
-        return {"status": "SAFE", "report": []}
 
     for sa in sa_list:
         name = sa.get("name", "")
         sa_id = sa.get("id", "")
-        access_key = access_key_sa(sa_id)
+        access_key = access_keys.get(sa_id, [])
 
         if not access_key:
             logger.info(f"Для SA: {name} Нету статического ключа")
@@ -88,18 +91,14 @@ def checks_sa_stat_key(folder_id: str) -> dict[str, Any]:
                 report.append(reports)
                 continue
 
-            if last_used:
-                last_usedet = datetime.fromisoformat(last_used.replace("Z", "+00:00"))
-                now = datetime.now(timezone.utc)
-                days_ago = (now - last_usedet).days
-            else:
-                days_ago = None
+            last_usedet = datetime.fromisoformat(last_used.replace("Z", "+00:00"))
+            now = datetime.now(timezone.utc)
+            days_ago = (now - last_usedet).days
 
             created = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
-            now = datetime.now(timezone.utc)
             days = (now - created).days
 
-            if days_ago is not None and days_ago >= 90:
+            if days_ago >= 90:
                 logger.warning(
                     f"Ключ не использовался 90 дней или больше. Забытый/потанциально утекший ключ sa: {name}"
                 )
@@ -122,5 +121,10 @@ def checks_sa_stat_key(folder_id: str) -> dict[str, Any]:
             report.append(reports)
 
     over = overall_risk(report, risk="risk")
+    if not report:
+        message = "Статических ключей у SA нет"
+    else:
+        stale = sum(1 for r in report if r["risk"] != "SAFE")
+        message = f"Статических ключей S3: {len(report)}, требуют внимания: {stale}"
 
-    return {"status": over, "report": report}
+    return finding_from_risk(rule_id, FOLDER_SCOPE, over, message, {"scope": "folder", "keys": report}, missing)

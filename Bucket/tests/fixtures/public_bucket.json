@@ -1,0 +1,54 @@
+{
+  "folder_id": "fixture-folder",
+  "cloud_id": "fixture-cloud",
+  "buckets": {
+    "public-bucket": {
+      "policy": {
+        "Version": "2012-10-17",
+        "Statement": [
+          {"Effect": "Allow", "Principal": "*", "Action": "s3:GetObject", "Resource": "arn:aws:s3:::public-bucket/*"}
+        ]
+      },
+      "acl": [
+        {"Grantee": {"Type": "Group", "URI": "http://acs.amazonaws.com/groups/global/AllUsers"}, "Permission": "READ"},
+        {"Grantee": {"Type": "CanonicalUser", "ID": "owner"}, "Permission": "FULL_CONTROL"}
+      ],
+      "versioning": {"Status": "Suspended"},
+      "cors": [{"AllowedOrigins": ["*"], "AllowedMethods": ["GET"]}]
+    },
+    "private-bucket": {
+      "acl": [{"Grantee": {"Type": "CanonicalUser", "ID": "owner"}, "Permission": "FULL_CONTROL"}],
+      "versioning": {"Status": "Enabled", "MFADelete": "Enabled"},
+      "encryption": {"Rules": [{"ApplyServerSideEncryptionByDefault": {"SSEAlgorithm": "aws:kms"}}]},
+      "lifecycle": [{"ID": "expire-tmp", "Status": "Enabled", "Prefix": "tmp/", "Expiration": {"Days": 7}}],
+      "logging": {"TargetBucket": "logs-bucket", "TargetPrefix": "private/"},
+      "object_lock": {"ObjectLockEnabled": "Enabled", "Rule": {"DefaultRetention": {"Mode": "COMPLIANCE", "Days": 30}}},
+      "replication": {"Role": "", "Rules": [{"ID": "to-backup", "Status": "Enabled"}]}
+    }
+  },
+  "iam": {
+    "folder_bindings": [
+      {"roleId": "storage.editor", "subject": {"id": "sa-app", "type": "serviceAccount"}},
+      {"roleId": "storage.viewer", "subject": {"id": "sa-reader", "type": "serviceAccount"}}
+    ],
+    "cloud_bindings": [],
+    "organization_bindings": []
+  },
+  "vms": [
+    {
+      "id": "vm-1",
+      "name": "web",
+      "serviceAccountId": "sa-app",
+      "networkInterfaces": [{"primaryV4Address": {"address": "10.0.0.5", "oneToOneNat": {"address": "203.0.113.10"}}}]
+    }
+  ],
+  "service_accounts": [
+    {"id": "sa-app", "name": "app"},
+    {"id": "sa-reader", "name": "reader"}
+  ],
+  "access_keys": {
+    "sa-app": [{"keyId": "key-never-used", "createdAt": "2026-01-01T00:00:00Z", "lastUsedAt": null}]
+  },
+  "triggers": [],
+  "cdn": {"origin_groups": [], "resources": []}
+}

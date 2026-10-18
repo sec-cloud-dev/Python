@@ -147,6 +147,11 @@ Bucket/
 ├── src/
 │   ├── main.py                  # оркестрация скана + push метрик
 │   ├── config.py                # env, роли, botocore Config
+│   ├── cli.py                   # scan --fixture … --fail-on high
+│   ├── scanner.py               # запуск всех checks → ScanResult
+│   ├── inventory.py             # IAM / VM / SA / keys — один раз на folder
+│   ├── fixture.py               # офлайн-fixture вместо Yandex API
+│   ├── metrics.py               # Pushgateway gauges по severity
 │   ├── checks/
 │   │   ├── bucket_checks.py     # S3-политики бакета
 │   │   ├── vm_checks.py         # VM → SA → Bucket
@@ -158,12 +163,12 @@ Bucket/
 │   │   ├── yandex_client.py     # YC REST API
 │   │   └── db_client.py         # PostgreSQL persistence
 │   └── utils/
+│       ├── models.py            # Finding / Severity / ScanResult
 │       ├── risk_utils.py        # overall_risk, bindings_source
 │       ├── extract_utils.py     # разбор access bindings
 │       └── error_utils.py       # единый маппинг ClientError
-├── tests/                       # pytest + mocks
+├── tests/                       # pytest + mocks + fixtures/
 ├── grafana/provisioning/        # datasource + dashboard
-├── .github/workflows/ci.yml     # DevSecOps pipeline
 ├── prometheus.yml
 ├── docker-compose.yml
 ├── Dockerfile
@@ -258,6 +263,25 @@ pip install -r requirements-dev.txt
 python -m src.main
 ```
 
+### CLI (для других пайплайнов)
+
+```bash
+cd Bucket
+# офлайн, без учётных данных Yandex Cloud
+python -m src.cli scan --fixture tests/fixtures/public_bucket.json --fail-on high
+
+# живой Yandex Cloud (переменные из .env), JSON-отчёт
+python -m src.cli scan --fail-on high --format json
+```
+
+| Код выхода | Значение |
+|------------|----------|
+| `0` | находок уровня `--fail-on` и выше нет |
+| `1` | есть находки уровня `--fail-on` и выше **или** проверки со статусом `unknown` |
+| `2` | скан не выполнен (нет конфигурации, API недоступен) |
+
+CLI не пишет в PostgreSQL и Pushgateway — это делает `python -m src.main`.
+
 ### Только образ сканера
 
 ```bash
@@ -273,11 +297,14 @@ docker run --rm --env-file .env --network <compose-network> bucket-scanner:lates
 
 | Metric | Описание |
 |--------|----------|
-| `scanner_danger_findings` | число findings со статусом `DANGER` |
-| `scanner_warning_findings` | число `WARNING` |
-| `scanner_safe_findings` | число `SAFE` / `NO_CONFIGURATION` |
+| `scanner_danger_findings` | число findings с `severity=high` |
+| `scanner_warning_findings` | число `medium` |
+| `scanner_safe_findings` | число `low` / `info` |
+| `scanner_unknown_findings` | проверки, которые не удалось выполнить (`unknown`) |
 | `scanner_buckets_scanned` | сколько бакетов просканировано |
 | `scanner_total_checks` | суммарное число проверок |
+
+Gauges считаются по `Finding.severity` — та же находка, что в логах и отчёте. Folder-level IAM находки считаются один раз на скан, а не на каждый бакет.
 
 **Job name:** `bucket_scanner`
 
@@ -293,13 +320,13 @@ Grafana подхватывает Prometheus datasource и dashboard из `grafan
 |------|-----|------------|
 | `scan_date` | `TIMESTAMP` | время скана |
 | `bucket_name` | `TEXT` | имя бакета |
-| `policy` … `replication` | `TEXT` | плоские статусы checks |
-| `bindings` | `JSONB` | цепочки VM → SA |
-| `roles` | `JSONB` | все SA с доступом |
-| `stat_key` | `JSONB` | аудит статических ключей |
-| `function` | `JSONB` | Cloud Functions triggers |
-| `cdn` | `JSONB` | CDN exposure |
-| `full_report` | `JSONB` | полный снимок отчёта |
+| `policy` … `replication` | `TEXT` | `severity` соответствующей проверки |
+| `bindings` | `JSONB` | finding `iam.vm_sa_access` (folder-level) |
+| `roles` | `JSONB` | finding `iam.sa_roles` (folder-level) |
+| `stat_key` | `JSONB` | finding `iam.static_keys` (folder-level) |
+| `function` | `JSONB` | finding `functions.trigger_sa` |
+| `cdn` | `JSONB` | finding `cdn.origin` |
+| `full_report` | `JSONB` | все findings бакета + folder-level findings |
 
 Пример запроса:
 
@@ -314,23 +341,27 @@ LIMIT 20;
 
 ## Модель рисков
 
-```text
-                    ┌────────────┐
-                    │  Findings  │
-                    └─────┬──────┘
-           ┌──────────────┼──────────────┐
-           ▼              ▼              ▼
-       ┌────────┐    ┌─────────┐    ┌────────┐
-       │ DANGER │    │ WARNING │    │  SAFE  │
-       └────────┘    └─────────┘    └────────┘
+Каждая проверка возвращает один `Finding` одной формы:
+
+```json
+{
+  "rule_id": "bucket.acl",
+  "severity": "high",
+  "bucket": "public-bucket",
+  "message": "ACL выдаёт доступ AllUsers/AuthenticatedUsers",
+  "evidence": {"grants": [{"URI": "http://acs.amazonaws.com/groups/global/AllUsers", "Permission": "READ"}]}
+}
 ```
 
-| Статус | Когда |
-|--------|--------|
-| `DANGER` | критичный риск: публичный доступ, опасные роли, ключ ≥ 90 дней |
-| `WARNING` | потенциальный риск / неизвестная роль / ключ не использовался |
-| `SAFE` | соответствует безопасной конфигурации |
-| `NO_CONFIGURATION` | настройка отсутствует (часто нейтрально, но стоит проверить) |
+| Severity | Когда |
+|----------|--------|
+| `high` | критичный риск: публичный доступ, опасные роли, ключ ≥ 90 дней |
+| `medium` | потенциальный риск / неизвестная роль / ключ не использовался |
+| `low` | защитная настройка не задана (шифрование, логирование, lifecycle…) |
+| `info` | соответствует безопасной конфигурации |
+| `unknown` | проверку не удалось выполнить: ошибка API (HTTP ≠ 2xx), нет прав, неполные данные. **Никогда не считается SAFE** |
+
+IAM-проверки (`iam.vm_sa_access`, `iam.sa_roles`, `iam.static_keys`) читают access bindings на уровне folder / cloud / organization, поэтому это **folder-level** находки (`bucket: "*"`, `evidence.scope: "folder"`): роль действует на все бакеты папки, bucket-level bindings не запрашиваются. IAM, VM, SA и статические ключи загружаются один раз на folder, а не на каждый бакет; `listAccessBindings` и `accessKeys` читаются постранично.
 
 Роли задаются в `src/config.py`:
 
@@ -357,35 +388,35 @@ VM (public IP: yes)
 
 ```bash
 pip install -r requirements-dev.txt
-pytest tests -v
+pytest
 ```
+
+Тесты не требуют учётных данных Yandex Cloud: `tests/fixtures/public_bucket.json` описывает публичный бакет (Policy `Principal "*"`, ACL `AllUsers`) и приватный бакет.
 
 Покрытые сценарии:
 
-- Policy → `DANGER` / `NO_CONFIGURATION`
-- VM + public IP + dangerous role → `DANGER`
-- Static key ≥ 90 дней → `DANGER`, never used → `WARNING`
-- `overall_risk` / `bindings_source`
+- Public ACL / Policy → `high`, и `scanner_danger_findings` растёт вместе с ними
+- HTTP ≠ 2xx от Yandex API → `unknown`, а не `SAFE`
+- пагинация `listAccessBindings` и `accessKeys`, inventory загружается один раз на folder
+- VM + public IP + dangerous role → `high`; static key ≥ 90 дней → `high`, never used → `medium`
+- CLI: `--fail-on high` → exit code `1`
 
 ---
 
 ## CI/CD / DevSecOps
 
-Workflow `.github/workflows/ci.yml`:
+Workflow в корне репозитория — `.github/workflows/ci.yml` (GitHub подхватывает workflows только оттуда):
 
 ```text
-push → master
+push / pull_request → main        (working-directory: Bucket)
    │
-   ├── Gitleaks          секреты в истории
-   ├── Bandit            SAST
-   ├── pytest            unit tests
-   ├── pip-audit         уязвимости зависимостей
-   ├── flake8            lint
-   └── build
-         ├── Docker image
-         ├── Trivy (CRITICAL)
-         └── push → Yandex Container Registry
+   ├── install deps     requirements-dev.txt
+   ├── pytest           офлайн, на fixture
+   ├── flake8           lint
+   └── bandit -r src    SAST
 ```
+
+Docker / Trivy / push в registry в этот workflow пока не входят.
 
 ---
 

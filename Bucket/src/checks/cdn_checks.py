@@ -1,17 +1,19 @@
 import logging
-from typing import Any
-from src.clients.yandex_client import cdn_originGroup_get, cdn_resources_get
-from src.utils.risk_utils import overall_risk
+from src.inventory import CloudInventory
+from src.utils.models import Finding
+from src.utils.risk_utils import finding_from_risk, overall_risk
 
 logger = logging.getLogger(__name__)
 
 
-def bucket_cdn_checkout(folder_id: str, name: str) -> dict[str, Any]:
+def bucket_cdn_checkout(inventory: CloudInventory, name: str) -> Finding:
+    rule_id = "cdn.origin"
     logger.info("Проверям связь bukcet - cdn (Не явный публичный доступ к ресурсам)")
+    missing = inventory.missing("cdn_origin_groups", "cdn_resources")
     report = []
 
-    group = cdn_originGroup_get(folder_id)
-    resources = cdn_resources_get(folder_id)
+    group = inventory.cdn_origin_groups or []
+    resources = inventory.cdn_resources or []
 
     for i in group:
         ids = i.get("id", "")
@@ -51,5 +53,10 @@ def bucket_cdn_checkout(folder_id: str, name: str) -> dict[str, Any]:
 
                 report.append(chains)
     overall = overall_risk(report, risk="Risk")
+    active_count = sum(1 for c in report if c["Status"])
+    if active_count:
+        message = f"Бакет раздаётся через активный CDN-ресурс: {active_count}"
+    else:
+        message = "Активных CDN-ресурсов с этим бакетом нет"
 
-    return {"risk": overall, "report": report}
+    return finding_from_risk(rule_id, name, overall, message, {"resources": report}, missing)

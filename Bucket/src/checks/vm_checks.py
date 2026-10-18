@@ -1,35 +1,25 @@
 import logging
 from typing import Any
-from src.clients.yandex_client import (
-    vm_get,
-    folder_access_bindings_get,
-    cloud_bindings_get,
-    organization_bindings_get,
-    organization_id_get,
-)
-from src.utils.extract_utils import _extract_sa_roles_for_bucket
-from src.utils.risk_utils import bindings_source, overall_risk
 from src.config import DANGEROUS_ROLES, SAFE_ROLES
+from src.inventory import BINDING_SOURCES, CloudInventory
+from src.utils.extract_utils import _extract_sa_roles_for_bucket
+from src.utils.models import FOLDER_SCOPE, Finding
+from src.utils.risk_utils import IAM_SCOPE_EVIDENCE, bindings_source, finding_from_risk, overall_risk
 
 logger = logging.getLogger(__name__)
 
 
-def checks_vm_sa_bucket_access(folder_id: str, cloud_id: str, bucket_name: str) -> dict[str, Any]:
-    logger.info(f"Проверка связи: ВМ -> SA -> Бакет '{bucket_name}'")
+def checks_vm_sa_bucket_access(inventory: CloudInventory) -> Finding:
+    """VM -> SA -> storage roles. Roles are folder/cloud/organization level, so this is a folder finding."""
+    rule_id = "iam.vm_sa_access"
+    logger.info("Проверка связи: ВМ -> SA -> Object Storage")
 
-    vms = vm_get(folder_id)
+    missing = inventory.missing("vms", *BINDING_SOURCES)
+    vms = inventory.vms or []
 
-    if not vms:
-        logger.info(f"В {folder_id} Не найдено ВМ")
-        return {"status": "NO_Links", "chains": []}
-
-    folder_bindings = folder_access_bindings_get(folder_id)
-    cloud_bindings = cloud_bindings_get(cloud_id)
-    organization_bindings = organization_bindings_get(organization_id_get())
-
-    folder_sa_roles, _ = _extract_sa_roles_for_bucket(folder_bindings)
-    cloud_sa_roles, _ = _extract_sa_roles_for_bucket(cloud_bindings)
-    organization_sa_roles, _ = _extract_sa_roles_for_bucket(organization_bindings)
+    folder_sa_roles, _ = _extract_sa_roles_for_bucket(inventory.folder_bindings or [])
+    cloud_sa_roles, _ = _extract_sa_roles_for_bucket(inventory.cloud_bindings or [])
+    organization_sa_roles, _ = _extract_sa_roles_for_bucket(inventory.organization_bindings or [])
 
     chains = []
 
@@ -75,26 +65,26 @@ def checks_vm_sa_bucket_access(folder_id: str, cloud_id: str, bucket_name: str) 
 
         if risk == "DANGER" and has_public_ip:
             logger.warning(
-                f"Бакет: {bucket_name}: КРИТИЧНО - ВМ '{vm_name}' имеет"
-                f"Публичный IP и ее SA ({sa_id}) имеет роли: {sorted(all_roles)}"
-                f"На бакет"
+                f"КРИТИЧНО - ВМ '{vm_name}' имеет публичный IP и ее SA ({sa_id}) "
+                f"имеет роли: {sorted(all_roles)} ({role_source})"
             )
         elif risk == "DANGER":
-            logger.warning(
-                f"Бакет: {bucket_name}: ВМ: '{vm_name}, SA: ({sa_id})' имеет"
-                f"Опасные роли: {sorted(all_roles)} На бакет"
-            )
+            logger.warning(f"ВМ: '{vm_name}', SA: ({sa_id}) имеет опасные роли: {sorted(all_roles)} ({role_source})")
         else:
-            logger.info(
-                f"Бакет: {bucket_name}: ВМ: '{vm_name}', SA: ({sa_id})," f"Роли: {sorted(all_roles)}, Риск: {risk}"
-            )
+            logger.info(f"ВМ: '{vm_name}', SA: ({sa_id}), Роли: {sorted(all_roles)}, Риск: {risk}")
 
     if not chains:
-        logger.info(f"Бакет: {bucket_name}: нет связей ВМ -> SA -> бакет")
+        logger.info("Нет связей ВМ -> SA с ролями")
 
-    overall_status = overall_risk(chains, risk="risk")
+    overall = overall_risk(chains, risk="risk")
+    dangerous = [c for c in chains if c["risk"] == "DANGER"]
+    if dangerous:
+        exposed = sum(1 for c in dangerous if c["public_ip"])
+        message = f"ВМ с SA, имеющим опасные роли на все бакеты папки: {len(dangerous)} (с публичным IP: {exposed})"
+    else:
+        message = f"ВМ с SA и ролями: {len(chains)}, опасных ролей нет"
 
-    return {"status": overall_status, "chains": chains}
+    return finding_from_risk(rule_id, FOLDER_SCOPE, overall, message, {**IAM_SCOPE_EVIDENCE, "chains": chains}, missing)
 
 
 def _vm_has_public_ip(vm: dict[str, Any]) -> bool:

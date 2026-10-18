@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  bucket-scanner:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: Bucket
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: |
+            Bucket/requirements.txt
+            Bucket/requirements-dev.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Tests
+        run: pytest
+
+      - name: Lint
+        run: flake8 src tests --max-line-length=120 --ignore=E501,E402,W291,W292
+
+      - name: Bandit
+        run: bandit -r src
